@@ -182,7 +182,7 @@ def generate_diff(
     *,
     max_retries: int = MAX_RETRIES,
     client: anthropic.Anthropic | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, dict[str, str]]:
     """
     Generate a unified diff for the task.
 
@@ -194,7 +194,9 @@ def generate_diff(
     files_read must contain the exact current content of every file Claude
     might need to edit (e.g. returned by explore()).
 
-    Returns (success, diff_text_or_error).
+    Returns (success, diff_text_or_error, changed_files). changed_files
+    maps filename -> full updated content, only for files actually edited —
+    this is what the apply step writes to disk. Empty dict on failure.
     """
     client = client or anthropic.Anthropic()
 
@@ -231,7 +233,7 @@ def generate_diff(
             diff_text = _build_unified_diffs(files_read, changed)
             _log("Final unified diff", diff_text)
             print("\nStopping: valid edits produced, unified diff built.")
-            return True, diff_text
+            return True, diff_text, changed
 
         messages.append({"role": "assistant", "content": response_text})
         messages.append(
@@ -246,4 +248,4 @@ def generate_diff(
         )
 
     print(f"\nStopping: max retries ({max_retries}) exhausted without valid edits.")
-    return False, response_text or "No edits produced."
+    return False, response_text or "No edits produced.", {}

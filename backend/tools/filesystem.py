@@ -40,7 +40,28 @@ def _resolve_in_repo(repo: Path, relative: str) -> Path:
 
 
 def read_file_tree(repo_path: str) -> str:
-    """Return a text directory tree for repo_path (skips common vendor/cache dirs)."""
+    """Return a text directory tree for the given repository path.
+
+    Recursively walks the directory structure starting at ``repo_path`` and
+    produces an ASCII tree representation (using ├──, └──, and │ characters).
+    Directories are listed before files at each level, with entries sorted
+    case-insensitively by name. Common vendor and cache directories (e.g.
+    ``.git``, ``node_modules``, ``__pycache__``, ``.venv``) are omitted from
+    the output. If a directory cannot be read due to a permissions error or
+    other OS-level issue, a descriptive placeholder line is inserted in its
+    place instead of raising an exception.
+
+    Args:
+        repo_path: Absolute or relative path to the root directory of the
+            repository. The path is expanded (``~`` is resolved) and resolved
+            to an absolute path internally. Raises ``NotADirectoryError`` if
+            the resolved path does not point to an existing directory.
+
+    Returns:
+        A newline-joined string containing the formatted directory tree, with
+        the repository root directory name as the first line followed by its
+        contents indented with tree-drawing characters.
+    """
     repo = _repo_root(repo_path)
     lines: list[str] = [f"{repo.name}/"]
 

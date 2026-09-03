@@ -1,59 +1,72 @@
-"""Phase 1 entry point: run the explorer + coder against a local repo, then apply."""
+"""Entry point: self-heal pipeline — task in, passing diff out.
+
+Runs explore -> code -> apply -> test -> fix against a local repo, entirely
+from the command line: python main.py "<task>" /path/to/repo
+"""
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agents.explorer import explore
-from agents.coder import generate_diff
-from tools.apply import write_files, verify_with_git
+from agents.healer import MAX_HEAL_RETRIES, self_heal
 
-# Hardcoded Phase 1 test inputs — change these for your local test repo
-TASK = (
+DEFAULT_TASK = (
     "Add a docstring to the read_file_tree function in backend/tools/filesystem.py "
     "explaining what it does and documenting the repo_path parameter."
 )
-REPO_PATH = Path(__file__).resolve().parent.parent
+DEFAULT_REPO_PATH = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
     load_dotenv(Path(__file__).resolve().parent / ".env")
 
-    print("PR Agent — Phase 1 Explorer + Coder + Apply")
-    print(f"Repo: {REPO_PATH}")
-    print(f"Task: {TASK}\n")
+    parser = argparse.ArgumentParser(
+        description="Self-heal pipeline: generate a diff, run tests, fix failures, "
+        "stop once tests pass (or the coder gives up, or retries run out)."
+    )
+    parser.add_argument(
+        "task", nargs="?", default=DEFAULT_TASK,
+        help="Natural-language description of the change to make.",
+    )
+    parser.add_argument(
+        "repo_path", nargs="?", default=str(DEFAULT_REPO_PATH),
+        help="Path to the target repository.",
+    )
+    parser.add_argument(
+        "--max-retries", type=int, default=MAX_HEAL_RETRIES,
+        help=f"Max test-and-fix cycles (default {MAX_HEAL_RETRIES}).",
+    )
+    args = parser.parse_args()
 
-    summary, files_read = explore(TASK, str(REPO_PATH))
+    repo_path = str(Path(args.repo_path).expanduser().resolve())
+
+    print("PR Agent — Self-Heal Pipeline")
+    print(f"Repo: {repo_path}")
+    print(f"Task: {args.task}\n")
+
+    result = self_heal(args.task, repo_path, max_retries=args.max_retries)
 
     print("\n" + "=" * 60)
-    print("FINAL EXPLORATION SUMMARY")
+    print("PIPELINE RESULT")
     print("=" * 60)
-    print(summary)
-    print(f"\nFiles read during exploration: {list(files_read.keys())}")
+    print(f"Success: {result.success}")
+    print(f"Attempts: {result.attempts}")
 
-    success, diff, changed_files = generate_diff(TASK, summary, files_read, str(REPO_PATH))
+    if result.success:
+        print("\nFinal passing diff:\n")
+        print(result.diff)
+    else:
+        if result.gave_up:
+            print(f"\nCoder judged this unfixable by editing code: {result.reason}")
+        else:
+            print(f"\nFailed: {result.reason}")
+        print("\nLast test report:\n")
+        print(result.last_report)
 
-    print("\n" + "=" * 60)
-    print("DIFF GENERATION RESULT")
-    print("=" * 60)
-    if not success:
-        print("Diff generation failed:")
-        print(diff)
-        return
-
-    print("Diff generated successfully:\n")
-    print(diff)
-
-    print("\n" + "=" * 60)
-    print("APPLY STEP")
-    print("=" * 60)
-    written = write_files(str(REPO_PATH), changed_files)
-    print(f"\nFiles written: {written}")
-
-    print("\n=== git diff --stat ===")
-    print(verify_with_git(str(REPO_PATH)))
+    raise SystemExit(0 if result.success else 1)
 
 
 if __name__ == "__main__":

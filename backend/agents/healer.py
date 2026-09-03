@@ -23,7 +23,7 @@ from agents.coder import generate_diff, propose_fix
 from agents.explorer import explore
 from tools import apply as apply_tools
 from tools import sandbox
-from tools.test_report import summarize
+from tools.report import summarize
 
 MAX_HEAL_RETRIES = 3
 

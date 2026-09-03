@@ -54,7 +54,18 @@ Rules:
   automatically from your edits.
 - No explanation, no commentary, no markdown code fences around the blocks.
 - Base changes strictly on the file content provided — do not invent files,
-  functions, or content that was not shown to you."""
+  functions, or content that was not shown to you.
+
+To create a file that does NOT already exist (e.g. a new test file), use
+this format instead — never SEARCH/REPLACE with an empty SEARCH section:
+
+### NEW FILE: path/relative/to/repo/root
+<<<<<<< NEW
+full content of the new file
+>>>>>>> NEW
+
+Only use ### NEW FILE for a path that doesn't already exist. To edit a
+file that exists, always use the SEARCH/REPLACE format above instead."""
 
 NO_FIX_INSTRUCTIONS = """
 
@@ -89,12 +100,26 @@ BLOCK_PATTERN = re.compile(
     re.DOTALL,
 )
 
+NEW_FILE_PATTERN = re.compile(
+    r"### NEW FILE:\s*(?P<filename>\S+)\s*\n"
+    r"<<<<<<< NEW\n"
+    r"(?P<content>.*?)\n"
+    r">>>>>>> NEW",
+    re.DOTALL,
+)
+
 
 @dataclass
 class EditBlock:
     filename: str
     search: str
     replace: str
+
+
+@dataclass
+class NewFileBlock:
+    filename: str
+    content: str
 
 
 @dataclass
@@ -144,26 +169,45 @@ def _parse_no_fix(response_text: str) -> str | None:
     return m.group("reason").strip() if m else None
 
 
+def _parse_new_files(response_text: str) -> list[NewFileBlock]:
+    return [
+        NewFileBlock(filename=m.group("filename"), content=m.group("content"))
+        for m in NEW_FILE_PATTERN.finditer(response_text)
+    ]
+
+
 def _validate_and_apply(
-    blocks: list[EditBlock], files_read: dict[str, str]
+    blocks: list[EditBlock], new_files: list[NewFileBlock], files_read: dict[str, str]
 ) -> tuple[bool, str, dict[str, str]]:
     """
     Check every SEARCH block matches file content exactly and unambiguously,
-    then apply it in memory. Returns (success, error_message, new_file_contents).
+    apply it in memory, and add any brand-new files. Returns (success,
+    error_message, new_file_contents).
 
     new_file_contents maps filename -> updated content, only for files that
-    were actually touched.
+    were actually touched or created.
     """
-    if not blocks:
-        return False, "No SEARCH/REPLACE blocks found in response.", {}
+    if not blocks and not new_files:
+        return False, "No SEARCH/REPLACE or NEW FILE blocks found in response.", {}
 
     working_content = dict(files_read)  # copy — apply blocks against this
+    touched: set[str] = set()
+
+    for new_file in new_files:
+        if new_file.filename in working_content:
+            return False, (
+                f"'{new_file.filename}' already exists — use SEARCH/REPLACE to "
+                "edit it, not ### NEW FILE."
+            ), {}
+        working_content[new_file.filename] = new_file.content
+        touched.add(new_file.filename)
 
     for block in blocks:
         if block.filename not in working_content:
             return False, (
                 f"File '{block.filename}' was not provided in context. "
-                f"Available files: {list(files_read.keys())}"
+                f"Available files: {list(files_read.keys())}. If this file "
+                "doesn't exist yet, use ### NEW FILE instead of SEARCH/REPLACE."
             ), {}
 
         content = working_content[block.filename]
@@ -183,11 +227,9 @@ def _validate_and_apply(
             ), {}
 
         working_content[block.filename] = content.replace(block.search, block.replace, 1)
+        touched.add(block.filename)
 
-    changed = {
-        fname: working_content[fname]
-        for fname in {b.filename for b in blocks}
-    }
+    changed = {fname: working_content[fname] for fname in touched}
     return True, "", changed
 
 
@@ -201,7 +243,7 @@ def _build_unified_diffs(
     """
     diff_parts = []
     for filename, new_content in updated.items():
-        old_content = original[filename]
+        old_content = original.get(filename, "")  # "" for brand-new files
         diff_lines = difflib.unified_diff(
             old_content.splitlines(keepends=True),
             new_content.splitlines(keepends=True),
@@ -264,7 +306,8 @@ def generate_diff(
         _log("Generated edit blocks", response_text)
 
         blocks = _parse_blocks(response_text)
-        valid, error, changed = _validate_and_apply(blocks, files_read)
+        new_files = _parse_new_files(response_text)
+        valid, error, changed = _validate_and_apply(blocks, new_files, files_read)
         _log("Validation result", f"valid={valid}" + ("" if valid else f" error={error}"))
 
         if valid:
@@ -279,8 +322,8 @@ def generate_diff(
                 "role": "user",
                 "content": (
                     f"That response had a problem:\n{error}\n\n"
-                    "Return corrected SEARCH/REPLACE blocks. Output ONLY the "
-                    "blocks, no explanation, no markdown fences."
+                    "Return corrected SEARCH/REPLACE or NEW FILE blocks. "
+                    "Output ONLY the blocks, no explanation, no markdown fences."
                 ),
             }
         )
@@ -347,7 +390,8 @@ def propose_fix(
             return FixOutcome(status="no_fix", reason=no_fix_reason)
 
         blocks = _parse_blocks(response_text)
-        valid, error, changed = _validate_and_apply(blocks, files_read)
+        new_files = _parse_new_files(response_text)
+        valid, error, changed = _validate_and_apply(blocks, new_files, files_read)
         _log("Validation result", f"valid={valid}" + ("" if valid else f" error={error}"))
 
         if valid:
@@ -362,8 +406,8 @@ def propose_fix(
                 "role": "user",
                 "content": (
                     f"That response had a problem:\n{error}\n\n"
-                    "Return corrected SEARCH/REPLACE blocks, or ### NO_FIX. "
-                    "Output ONLY that, no explanation, no markdown fences."
+                    "Return corrected SEARCH/REPLACE or NEW FILE blocks, or "
+                    "### NO_FIX. Output ONLY that, no explanation, no markdown fences."
                 ),
             }
         )

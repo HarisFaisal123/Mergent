@@ -122,6 +122,8 @@ def summarize_result(result: SandboxResult) -> str:
         return f"{label} Test run timed out after producing no result."
 
     if result.success:
+        if result.project.language == "python" and result.test.exit_code == 5:
+            return f"{label} No tests found — nothing to verify."
         return f"{label} All tests passed."
 
     if result.project.language == "python":

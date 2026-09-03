@@ -291,8 +291,16 @@ def _run_project(
                 error="Test run timed out.",
             )
 
+        # pytest exit code 5 means "no tests were collected" — a repo/subdir
+        # with no test files yet, not a broken change. Treating that as a
+        # failure would make every task against an untested project fail
+        # regardless of what the coder does, so only exit codes that mean
+        # "tests ran and something broke" count as failure.
+        no_tests_collected = project.language == "python" and test.exit_code == 5
+        success = test.exit_code == 0 or no_tests_collected
+
         return SandboxResult(
-            success=test.exit_code == 0, project=project, install=install, test=test,
+            success=success, project=project, install=install, test=test,
         )
 
     finally:

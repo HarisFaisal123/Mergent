@@ -14,8 +14,9 @@ from dotenv import load_dotenv
 from agents.healer import MAX_HEAL_RETRIES, self_heal
 
 DEFAULT_TASK = (
-    "Add a docstring to the read_file_tree function in backend/tools/filesystem.py "
-    "explaining what it does and documenting the repo_path parameter."
+    "Add unit tests for detect_projects in backend/tools/sandbox.py, covering: a repo "
+    "with only a Python manifest, only a Node manifest, both in separate subdirectories, "
+    "and a manage.py-based Django project."
 )
 DEFAULT_REPO_PATH = Path(__file__).resolve().parent.parent
 

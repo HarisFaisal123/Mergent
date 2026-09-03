@@ -56,6 +56,29 @@ Rules:
 - Base changes strictly on the file content provided — do not invent files,
   functions, or content that was not shown to you."""
 
+NO_FIX_INSTRUCTIONS = """
+
+You may instead be shown a test failure from a previous attempt of yours,
+with the diff that caused it and the test output. In that case, propose
+corrected SEARCH/REPLACE edits the same way as above — against the
+ORIGINAL file content shown to you, not against your previous diff.
+
+If, and only if, the failure is not something an edit to this repository's
+code could fix at all — an environment/infrastructure problem such as a
+network failure fetching packages, a missing system library, or a sandbox
+misconfiguration — respond instead with exactly:
+
+### NO_FIX
+<one or two sentence explanation of why no code change could fix this>
+
+A dependency merely missing from requirements.txt/pyproject.toml/package.json
+is NOT a NO_FIX case — adding it is a valid code fix. Only give up when you
+are confident no code change could plausibly address the failure."""
+
+FIX_SYSTEM_PROMPT = SYSTEM_PROMPT + NO_FIX_INSTRUCTIONS
+
+NO_FIX_PATTERN = re.compile(r"###\s*NO_FIX\s*\n(?P<reason>.*)", re.DOTALL)
+
 BLOCK_PATTERN = re.compile(
     r"### FILE:\s*(?P<filename>\S+)\s*\n"
     r"<<<<<<< SEARCH\n"
@@ -74,6 +97,14 @@ class EditBlock:
     replace: str
 
 
+@dataclass
+class FixOutcome:
+    status: str  # "fixed" | "no_fix" | "invalid"
+    diff: str = ""
+    changed_files: dict[str, str] | None = None
+    reason: str = ""
+
+
 def _log(title: str, payload: Any) -> None:
     print(f"\n=== {title} ===")
     if isinstance(payload, str):
@@ -82,11 +113,13 @@ def _log(title: str, payload: Any) -> None:
         print(json.dumps(payload, indent=2, default=str))
 
 
-def _call_model(messages: list[MessageParam], client: anthropic.Anthropic) -> str:
+def _call_model(
+    messages: list[MessageParam], client: anthropic.Anthropic, *, system: str = SYSTEM_PROMPT
+) -> str:
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS_PER_RESPONSE,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=messages,
     )
 
@@ -104,6 +137,11 @@ def _parse_blocks(response_text: str) -> list[EditBlock]:
         EditBlock(filename=m.group("filename"), search=m.group("search"), replace=m.group("replace"))
         for m in BLOCK_PATTERN.finditer(response_text)
     ]
+
+
+def _parse_no_fix(response_text: str) -> str | None:
+    m = NO_FIX_PATTERN.search(response_text)
+    return m.group("reason").strip() if m else None
 
 
 def _validate_and_apply(
@@ -249,3 +287,86 @@ def generate_diff(
 
     print(f"\nStopping: max retries ({max_retries}) exhausted without valid edits.")
     return False, response_text or "No edits produced.", {}
+
+
+def propose_fix(
+    task: str,
+    exploration_summary: str,
+    files_read: dict[str, str],
+    failed_diff: str,
+    test_report: str,
+    *,
+    max_retries: int = MAX_RETRIES,
+    client: anthropic.Anthropic | None = None,
+) -> FixOutcome:
+    """
+    Ask the coder to fix a diff that applied cleanly but failed the sandbox
+    test run. Unlike generate_diff's internal retries (which only correct
+    malformed SEARCH/REPLACE syntax), this hands the model real test
+    failure output and a genuine choice: propose a corrected diff, or
+    respond with ### NO_FIX if it judges the failure isn't something a
+    code edit could address at all (see NO_FIX_INSTRUCTIONS). The caller
+    (the self-heal loop) treats "no_fix" as a reason to stop retrying,
+    not as a failure to retry harder.
+
+    Edits are validated against files_read — the ORIGINAL file content,
+    not failed_diff's result — since the caller reverts the working tree
+    to that original state before calling this.
+    """
+    client = client or anthropic.Anthropic()
+
+    file_context = "\n\n".join(
+        f"--- FILE: {path} ---\n{content}" for path, content in files_read.items()
+    )
+
+    messages: list[MessageParam] = [
+        {
+            "role": "user",
+            "content": (
+                f"Task:\n{task}\n\n"
+                f"Exploration summary:\n{exploration_summary}\n\n"
+                f"Current content of relevant files:\n{file_context}\n\n"
+                f"You previously proposed this diff:\n{failed_diff}\n\n"
+                f"It applied cleanly, but the test run failed:\n{test_report}\n\n"
+                "Propose corrected SEARCH/REPLACE edit blocks against the "
+                "original file content above, or respond with ### NO_FIX "
+                "if this cannot be fixed by editing code."
+            ),
+        }
+    ]
+
+    for attempt in range(1, max_retries + 1):
+        print(f"\n--- Fix attempt {attempt}/{max_retries} ---")
+
+        response_text = _call_model(messages, client, system=FIX_SYSTEM_PROMPT)
+        _log("Fix proposal", response_text)
+
+        no_fix_reason = _parse_no_fix(response_text)
+        if no_fix_reason is not None:
+            print("\nStopping: coder judged this unfixable by editing code.")
+            return FixOutcome(status="no_fix", reason=no_fix_reason)
+
+        blocks = _parse_blocks(response_text)
+        valid, error, changed = _validate_and_apply(blocks, files_read)
+        _log("Validation result", f"valid={valid}" + ("" if valid else f" error={error}"))
+
+        if valid:
+            diff_text = _build_unified_diffs(files_read, changed)
+            _log("Final unified diff", diff_text)
+            print("\nStopping: valid fix produced.")
+            return FixOutcome(status="fixed", diff=diff_text, changed_files=changed)
+
+        messages.append({"role": "assistant", "content": response_text})
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"That response had a problem:\n{error}\n\n"
+                    "Return corrected SEARCH/REPLACE blocks, or ### NO_FIX. "
+                    "Output ONLY that, no explanation, no markdown fences."
+                ),
+            }
+        )
+
+    print(f"\nStopping: max retries ({max_retries}) exhausted without a valid fix.")
+    return FixOutcome(status="invalid", reason="Max retries exhausted without valid edits or NO_FIX.")

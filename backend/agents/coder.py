@@ -27,8 +27,8 @@ import anthropic
 from anthropic.types import MessageParam
 
 MAX_RETRIES = 3
-MODEL = "claude-sonnet-4-6"
-MAX_TOKENS_PER_RESPONSE = 4096
+MODEL = "claude-haiku-4-5-20251001"
+MAX_TOKENS_PER_RESPONSE = 8192
 
 SYSTEM_PROMPT = """You are a coding agent that proposes file edits to accomplish a task.
 
@@ -90,6 +90,15 @@ FIX_SYSTEM_PROMPT = SYSTEM_PROMPT + NO_FIX_INSTRUCTIONS
 
 NO_FIX_PATTERN = re.compile(r"###\s*NO_FIX\s*\n(?P<reason>.*)", re.DOTALL)
 
+TRUNCATION_FEEDBACK = (
+    "Your previous response was cut off before it finished — it hit the "
+    "output length limit partway through a block, so that block has no "
+    "closing marker and was discarded entirely (not just shortened). "
+    "Propose fewer files/edits in this response than last time, and make "
+    "sure every block you include is fully closed with its "
+    ">>>>>>> REPLACE or >>>>>>> NEW marker before the response ends."
+)
+
 BLOCK_PATTERN = re.compile(
     r"### FILE:\s*(?P<filename>\S+)\s*\n"
     r"<<<<<<< SEARCH\n"
@@ -140,7 +149,16 @@ def _log(title: str, payload: Any) -> None:
 
 def _call_model(
     messages: list[MessageParam], client: anthropic.Anthropic, *, system: str = SYSTEM_PROMPT
-) -> str:
+) -> tuple[str, str | None]:
+    """Returns (response_text, stop_reason).
+
+    stop_reason == "max_tokens" means the response was cut off before the
+    model finished — any SEARCH/REPLACE or NEW FILE block still "open" at
+    that point has no closing marker, so it silently fails to parse rather
+    than raising an error. Callers must check this BEFORE parsing, or a
+    truncated response reads as "the model just produced fewer edits"
+    instead of "the model didn't finish."
+    """
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS_PER_RESPONSE,
@@ -152,9 +170,11 @@ def _call_model(
         print(
             f"Tokens this step: {response.usage.input_tokens + response.usage.output_tokens}"
         )
+    if response.stop_reason == "max_tokens":
+        print("WARNING: response truncated — hit max_tokens before finishing.")
 
     text_blocks = [block.text for block in response.content if block.type == "text"]
-    return "\n".join(text_blocks).strip()
+    return "\n".join(text_blocks).strip(), response.stop_reason
 
 
 def _parse_blocks(response_text: str) -> list[EditBlock]:
@@ -302,8 +322,14 @@ def generate_diff(
     for attempt in range(1, max_retries + 1):
         print(f"\n--- Coder attempt {attempt}/{max_retries} ---")
 
-        response_text = _call_model(messages, client)
+        response_text, stop_reason = _call_model(messages, client)
         _log("Generated edit blocks", response_text)
+
+        if stop_reason == "max_tokens":
+            print("\nResponse truncated — asking for fewer/smaller edits, not parsing this one.")
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({"role": "user", "content": TRUNCATION_FEEDBACK})
+            continue
 
         blocks = _parse_blocks(response_text)
         new_files = _parse_new_files(response_text)
@@ -381,8 +407,14 @@ def propose_fix(
     for attempt in range(1, max_retries + 1):
         print(f"\n--- Fix attempt {attempt}/{max_retries} ---")
 
-        response_text = _call_model(messages, client, system=FIX_SYSTEM_PROMPT)
+        response_text, stop_reason = _call_model(messages, client, system=FIX_SYSTEM_PROMPT)
         _log("Fix proposal", response_text)
+
+        if stop_reason == "max_tokens":
+            print("\nResponse truncated — asking for fewer/smaller edits, not parsing this one.")
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({"role": "user", "content": TRUNCATION_FEEDBACK})
+            continue
 
         no_fix_reason = _parse_no_fix(response_text)
         if no_fix_reason is not None:

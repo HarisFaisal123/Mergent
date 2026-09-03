@@ -30,6 +30,7 @@ whatever happens.
 from __future__ import annotations
 
 import concurrent.futures
+import os
 import shlex
 import time
 import uuid
@@ -43,6 +44,24 @@ from docker.models.networks import Network
 from tools.filesystem import SKIP_DIR_NAMES
 
 DEFAULT_TIMEOUT_SECONDS = 300
+
+
+def _ensure_docker_cli_on_path() -> None:
+    """Make sure Docker Desktop's credential helper is reachable.
+
+    docker-credential-desktop lives in ~/.docker/bin, which macOS's Docker
+    Desktop installer only adds to ~/.zprofile (login shells) — not
+    ~/.zshrc, which every non-login interactive shell (many IDE terminals,
+    run configurations) actually sources. Without it on PATH, pulling any
+    image that isn't already cached fails with a credential-store error
+    even though the daemon itself is reachable. This makes run_tests()
+    work regardless of what shell launched the Python process, rather
+    than silently depending on the caller's shell config.
+    """
+    docker_bin = str(Path.home() / ".docker" / "bin")
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    if Path(docker_bin).is_dir() and docker_bin not in path_entries:
+        os.environ["PATH"] = os.pathsep.join([docker_bin, *path_entries])
 
 POSTGRES_IMAGE = "postgres:16-alpine"
 POSTGRES_ENV = {
@@ -342,5 +361,6 @@ def run_tests(
             ),
         )]
 
+    _ensure_docker_cli_on_path()
     client = client or docker.from_env()
     return [_run_project(client, repo, project, timeout_seconds) for project in projects]

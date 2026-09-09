@@ -1,16 +1,24 @@
 """Self-heal loop: explore -> code -> apply -> test -> (fix or give up).
 
-Each retry attempt reverts the working tree to the ORIGINAL file content
-(from explore()) before asking the coder for a fix — the same "always
-diff against ground truth, use conversation context to remember what went
-wrong" pattern coder.py already uses for its own SEARCH/REPLACE-syntax
-retries, just extended one level up to cover test failures too.
+The working tree is reverted to the ORIGINAL file content (from
+explore()) only when another candidate is about to be written over it —
+the same "always diff against ground truth, use conversation context to
+remember what went wrong" pattern coder.py already uses for its own
+SEARCH/REPLACE-syntax retries, just extended one level up to cover test
+failures too. (propose_fix validates against files_read, never against
+disk, so deferring the revert until after it returns is safe.)
 
 Whether to keep retrying after a test failure is the coder's call, not a
 hardcoded rule here: it either proposes a corrected diff or responds with
 NO_FIX (see coder.NO_FIX_INSTRUCTIONS) when it judges the failure is an
 environment/infra problem no code edit could address. This loop stops
-immediately on NO_FIX rather than burning remaining retries.
+immediately on NO_FIX rather than burning remaining retries — and leaves
+that candidate applied on disk, since NO_FIX asserts the diff itself is
+sound and the sandbox is what broke.
+
+Every return carries the last candidate diff, including the failure
+paths, so a run that ends without passing tests still hands back the work
+it produced instead of discarding it.
 """
 
 from __future__ import annotations
@@ -36,6 +44,8 @@ class HealResult:
     reason: str = ""
     gave_up: bool = False
     last_report: str = ""
+    applied: bool = False
+    """Whether `diff` is still written to the working tree on return."""
 
 
 def self_heal(
@@ -80,13 +90,15 @@ def self_heal(
         print(f"\n{report}")
 
         if all(r.success for r in results):
-            return HealResult(success=True, attempts=attempt, diff=diff, last_report=report)
-
-        apply_tools.revert(repo_path, list(changed_files.keys()))
+            return HealResult(
+                success=True, attempts=attempt, diff=diff,
+                last_report=report, applied=True,
+            )
 
         if attempt == max_retries:
+            apply_tools.revert(repo_path, list(changed_files.keys()))
             return HealResult(
-                success=False, attempts=attempt,
+                success=False, attempts=attempt, diff=diff,
                 reason="Max retries exhausted.", last_report=report,
             )
 
@@ -94,13 +106,23 @@ def self_heal(
         outcome = propose_fix(task, summary, files_read, diff, report, client=client)
 
         if outcome.status == "no_fix":
+            # Deliberately NOT reverted. NO_FIX means the coder judged the
+            # failure environmental (sandbox misconfiguration, a package it
+            # could not fetch, a sidecar that never came up), i.e. the diff
+            # is probably fine and the sandbox is what broke. Discarding the
+            # candidate here would throw away good work on the strongest
+            # available signal that it is worth keeping.
+            print("\nLeaving the candidate applied — coder judged the failure environmental.")
             return HealResult(
-                success=False, attempts=attempt, gave_up=True,
-                reason=outcome.reason, last_report=report,
+                success=False, attempts=attempt, gave_up=True, diff=diff,
+                reason=outcome.reason, last_report=report, applied=True,
             )
+
+        apply_tools.revert(repo_path, list(changed_files.keys()))
+
         if outcome.status == "invalid":
             return HealResult(
-                success=False, attempts=attempt,
+                success=False, attempts=attempt, diff=diff,
                 reason=f"Coder produced invalid edits: {outcome.reason}", last_report=report,
             )
 
@@ -108,4 +130,6 @@ def self_heal(
         changed_files = outcome.changed_files or {}
 
     # Unreachable: the loop above always returns by the final iteration.
-    return HealResult(success=False, attempts=max_retries, reason="Max retries exhausted.")
+    return HealResult(
+        success=False, attempts=max_retries, diff=diff, reason="Max retries exhausted."
+    )

@@ -67,6 +67,17 @@ def main() -> None:
         print("\nLast test report:\n")
         print(result.last_report)
 
+        # Print the candidate even on failure — a run that ends on NO_FIX or
+        # exhausted retries still produced real work, and reverting it off
+        # disk is not a reason to make it unrecoverable.
+        if result.diff:
+            print("\nLast candidate diff:\n")
+            print(result.diff)
+            if result.applied:
+                print("\nThese changes are still applied to the working tree.")
+            else:
+                print("\nThe working tree was reverted; the diff above is unapplied.")
+
     raise SystemExit(0 if result.success else 1)
 
 

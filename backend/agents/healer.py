@@ -23,7 +23,7 @@ it produced instead of discarding it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import anthropic
 
@@ -46,6 +46,8 @@ class HealResult:
     last_report: str = ""
     applied: bool = False
     """Whether `diff` is still written to the working tree on return."""
+    changed_paths: list[str] = field(default_factory=list)
+    """Repo-relative paths the candidate touched — what a commit should stage."""
 
 
 def self_heal(
@@ -91,8 +93,8 @@ def self_heal(
 
         if all(r.success for r in results):
             return HealResult(
-                success=True, attempts=attempt, diff=diff,
-                last_report=report, applied=True,
+                success=True, attempts=attempt, diff=diff, last_report=report,
+                applied=True, changed_paths=list(changed_files.keys()),
             )
 
         if attempt == max_retries:
@@ -100,6 +102,7 @@ def self_heal(
             return HealResult(
                 success=False, attempts=attempt, diff=diff,
                 reason="Max retries exhausted.", last_report=report,
+                changed_paths=list(changed_files.keys()),
             )
 
         print("\n--- Asking coder to fix the failure ---")
@@ -116,6 +119,7 @@ def self_heal(
             return HealResult(
                 success=False, attempts=attempt, gave_up=True, diff=diff,
                 reason=outcome.reason, last_report=report, applied=True,
+                changed_paths=list(changed_files.keys()),
             )
 
         apply_tools.revert(repo_path, list(changed_files.keys()))
@@ -124,6 +128,7 @@ def self_heal(
             return HealResult(
                 success=False, attempts=attempt, diff=diff,
                 reason=f"Coder produced invalid edits: {outcome.reason}", last_report=report,
+                changed_paths=list(changed_files.keys()),
             )
 
         diff = outcome.diff

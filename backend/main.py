@@ -44,21 +44,19 @@ def main() -> None:
         help=f"Max test-and-fix cycles (default {MAX_HEAL_RETRIES}).",
     )
     parser.add_argument(
-        "--pr", action="store_true",
-        help="Push the resulting change to a branch and open a GitHub pull request.",
+        "--pr", action=argparse.BooleanOptionalAction, default=True,
+        help="Push the resulting change to a branch and open a GitHub pull request "
+             "(default: on; use --no-pr for a local-only run).",
     )
     args = parser.parse_args()
 
     repo_path = str(Path(args.repo_path).expanduser().resolve())
 
-    # Refuse to PR against Mergent itself. repo_path defaults to this repo,
-    # so a bare `--pr` run would otherwise have the agent open a pull request
-    # on its own source rather than on the repo under test.
+    # Opening a PR is the default, and repo_path defaults to Mergent itself, so
+    # a bare `python main.py` has the agent propose changes to its own source.
+    # That is intended — but say so, since it is a push to a real remote.
     if args.pr and git_ops.is_same_repo(repo_path, DEFAULT_REPO_PATH):
-        parser.error(
-            "--pr requires an explicit repo_path: refusing to open a pull request "
-            "against Mergent's own repository."
-        )
+        print("NOTE: targeting Mergent's own repository.\n")
 
     # Validate everything the PR step needs BEFORE the pipeline runs. These
     # checks are free, and the run they precede costs several minutes of model

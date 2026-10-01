@@ -16,10 +16,15 @@ from agents.healer import HealResult, MAX_HEAL_RETRIES, self_heal
 from tools import git_ops
 from tools import github as gh
 
+# Deliberately small: a bare `python main.py` is the end-to-end smoke test for
+# the whole pipeline, up to and including opening the PR, so the task should
+# cost one coder pass rather than several. slugify and branch_name are pure
+# functions with no tests yet.
 DEFAULT_TASK = (
-    "Add unit tests for detect_projects in backend/tools/sandbox.py, covering: a repo "
-    "with only a Python manifest, only a Node manifest, both in separate subdirectories, "
-    "and a manage.py-based Django project."
+    "Add unit tests for slugify and branch_name in backend/tools/git_ops.py, in a new "
+    "backend/tests/test_git_ops.py, covering: a task string with spaces and punctuation, "
+    "a string of only non-alphanumeric characters, truncation of an over-long string, "
+    "and that branch_name is prefixed and unique across two calls with the same task."
 )
 DEFAULT_REPO_PATH = Path(__file__).resolve().parent.parent
 
